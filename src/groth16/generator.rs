@@ -2,9 +2,11 @@ use rand_core::RngCore;
 
 use std::sync::Arc;
 
+use std::fmt::{Display, Formatter, Error};
 use ff::{Field, PrimeField};
 use groupy::{CurveAffine, CurveProjective, Wnaf};
 use paired::Engine;
+use log::info;
 
 use super::{Parameters, VerifyingKey};
 
@@ -48,6 +50,74 @@ struct KeypairAssembly<E: Engine> {
     at_aux: Vec<Vec<(E::Fr, usize)>>,
     bt_aux: Vec<Vec<(E::Fr, usize)>>,
     ct_aux: Vec<Vec<(E::Fr, usize)>>,
+}
+
+pub struct R1CSSystem<E: Engine> {
+    a: Vec<Vec<(usize, E::Fr)>>,
+    b: Vec<Vec<(usize, E::Fr)>>,
+    c: Vec<Vec<(usize, E::Fr)>>
+}
+
+impl<E: Engine> Display for R1CSSystem<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        let n = self.a.len();
+        for (_i, constraint) in self.a.iter().enumerate()  {
+            write!(f, "constraint {}: ", _i);
+            for (term_j, term_coeff) in constraint {
+                write!(f, "({}, {}) ", term_coeff, term_j);
+            }
+            writeln!(f);
+        }
+
+
+        Ok(())
+    }
+}
+
+impl<E: Engine> KeypairAssembly<E> {
+
+    fn dump_r1cs(&self) -> R1CSSystem<E> {
+        fn dump_variable<E: Engine>(r1cs: &mut [Vec<(usize, E::Fr)>], vars: & [Vec<(E::Fr, usize)>]) {
+            for (var_index, var_constraints) in vars.iter().enumerate() {
+                for (coeff, constraint_index) in var_constraints {
+                    r1cs[constraint_index.clone()].push((var_index, coeff.clone()));
+                }
+            }
+        }
+
+        fn init<E: Engine>(r1cs: &mut Vec<Vec<(usize, E::Fr)>>, n: usize) {
+            let mut i = 0;
+            while i < n {
+                r1cs.push(vec![]);
+                i += 1;
+            }
+        }
+
+        let mut r1cs_a: Vec<Vec<(usize, E::Fr)>> = vec![];
+        let mut r1cs_b: Vec<Vec<(usize, E::Fr)>> = vec![];
+        let mut r1cs_c: Vec<Vec<(usize, E::Fr)>> = vec![];
+
+        // r1cs_a
+        init::<E>(&mut r1cs_a, self.num_constraints);
+        dump_variable::<E>(&mut r1cs_a, &self.at_inputs);
+        dump_variable::<E>(&mut r1cs_a, &self.at_aux);
+
+        // r1cs_b
+        init::<E>(&mut r1cs_b, self.num_constraints);
+        dump_variable::<E>(&mut r1cs_b, &self.bt_inputs);
+        dump_variable::<E>(&mut r1cs_b, &self.bt_aux);
+
+        // r1cs_c
+        init::<E>(&mut r1cs_c, self.num_constraints);
+        dump_variable::<E>(&mut r1cs_c, &self.ct_inputs);
+        dump_variable::<E>(&mut r1cs_c, &self.ct_aux);
+
+        R1CSSystem {
+            a: r1cs_a,
+            b: r1cs_b,
+            c: r1cs_c
+        }
+    }
 }
 
 impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
@@ -182,6 +252,7 @@ where
     // Allocate the "one" input variable
     assembly.alloc_input(|| "", || Ok(E::Fr::one()))?;
 
+    println!("begin to synthesize the circuit");
     // Synthesize the circuit.
     circuit.synthesize(&mut assembly)?;
 
@@ -191,6 +262,14 @@ where
         assembly.enforce(|| "", |lc| lc + Variable(Index::Input(i)), |lc| lc, |lc| lc);
     }
 
+    println!("finished synthesizing the circuit");
+    println!("circuit's num of inputs: {}", assembly.num_inputs);
+    println!("circuit's num of aux inputs: {}", assembly.num_aux);
+    println!("circuit's num of constraints: {}", assembly.num_constraints);
+
+    let r1cs = assembly.dump_r1cs();
+    println!("r1cs: {}", r1cs);
+    // dump out the R1CS constraints of this circuit
     // Create bases for blind evaluation of polynomials at tau
     let powers_of_tau = vec![Scalar::<E>(E::Fr::zero()); assembly.num_constraints];
     let mut powers_of_tau = EvaluationDomain::from_coeffs(powers_of_tau)?;
